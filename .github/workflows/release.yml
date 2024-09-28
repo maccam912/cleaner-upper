@@ -7,13 +7,45 @@ permissions:
     packages: write
 
 jobs:
-  release-linux-amd64:
-    name: release linux/amd64
+  releases-matrix:
+    name: Release Go Binary
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin, freebsd, openbsd, netbsd, dragonfly, solaris, illumos, plan9, aix]
+        goarch: [386, amd64, arm, arm64, ppc64, ppc64le, mips, mipsle, mips64, mips64le, s390x, riscv64, loong64]
+        exclude:
+          # Exclude combinations that don't make sense or are not supported
+          - goarch: 386
+            goos: darwin
+          - goarch: arm
+            goos: darwin
+          - goarch: arm64
+            goos: windows
+          - goarch: arm
+            goos: windows
+          - goarch: ppc64
+            goos: windows
+          - goarch: ppc64le
+            goos: windows
+          - goarch: mips
+            goos: windows
+          - goarch: mipsle
+            goos: windows
+          - goarch: mips64
+            goos: windows
+          - goarch: mips64le
+            goos: windows
+          - goarch: s390x
+            goos: windows
+          - goarch: riscv64
+            goos: windows
+          - goarch: loong64
+            goos: windows
     steps:
     - uses: actions/checkout@v4
     - uses: wangyoucao577/go-release-action@v1
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        goos: linux
-        goarch: amd64
+        goos: ${{ matrix.goos }}
+        goarch: ${{ matrix.goarch }}

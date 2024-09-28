@@ -5,7 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+const NUM_WORKERS = 100
+const CHANNEL_BUFFER = 1000
 
 // Cleaner is responsible for finding and deleting reproducible folders.
 type Cleaner struct {
@@ -25,12 +29,17 @@ func NewCleaner(rootPath string, dryRun, force bool) *Cleaner {
 
 // Clean initiates the cleaning process.
 func (c *Cleaner) Clean() {
-	deletionTasks := c.WalkConcurrently()
+	progressChan := make(chan string, CHANNEL_BUFFER)
+	deletionTasks, totalScanned := c.WalkConcurrently(progressChan)
+
+	close(progressChan)
 
 	if len(deletionTasks) == 0 {
-		fmt.Println("No directories found to clean up.")
+		fmt.Println("\nNo directories found to clean up.")
 		return
 	}
+
+	fmt.Printf("\nScanned a total of %d directories.\n", totalScanned)
 
 	if !c.dryRun && !c.force {
 		fmt.Printf("Found %d directories to clean up. Total size: %s\n", len(deletionTasks), HumanizeBytes(calculateTotalSize(deletionTasks)))
@@ -45,16 +54,16 @@ func (c *Cleaner) Clean() {
 }
 
 // WalkConcurrently performs a concurrent filesystem walk.
-func (c *Cleaner) WalkConcurrently() []FolderDeletionTask {
-	const numWorkers = 10
-	paths := make(chan string, 100)
-	results := make(chan FolderDeletionTask, 100)
+func (c *Cleaner) WalkConcurrently(progressChan chan string) ([]FolderDeletionTask, int) {
+	const numWorkers = NUM_WORKERS
+	paths := make(chan string, CHANNEL_BUFFER)
+	results := make(chan FolderDeletionTask, CHANNEL_BUFFER)
 	var wg sync.WaitGroup
 
 	// Start worker goroutines
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go c.worker(paths, results, &wg)
+		go c.worker(paths, results, progressChan, &wg)
 	}
 
 	// Start a goroutine to close the results channel when all workers are done
@@ -63,6 +72,7 @@ func (c *Cleaner) WalkConcurrently() []FolderDeletionTask {
 		close(results)
 	}()
 
+	totalScanned := 0
 	// Walk the directory tree and send paths to the workers
 	go func() {
 		err := filepath.Walk(c.rootPath, func(path string, info os.FileInfo, err error) error {
@@ -72,6 +82,8 @@ func (c *Cleaner) WalkConcurrently() []FolderDeletionTask {
 			}
 			if info.IsDir() {
 				paths <- path
+				totalScanned++
+				progressChan <- path
 			}
 			return nil
 		})
@@ -81,22 +93,48 @@ func (c *Cleaner) WalkConcurrently() []FolderDeletionTask {
 		close(paths)
 	}()
 
+	// Start a goroutine to print progress
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		var lastPath string
+		var maxLength int
+		for {
+			select {
+			case path, ok := <-progressChan:
+				if !ok {
+					return
+				}
+				lastPath = path
+				if len(path) > maxLength {
+					maxLength = len(path)
+				}
+			case <-ticker.C:
+				if lastPath != "" && false {
+					paddedPath := fmt.Sprintf("%-*s", maxLength, lastPath)
+					fmt.Printf("\rScanning: %s", paddedPath)
+				}
+			}
+		}
+	}()
+
 	// Collect results
 	var deletionTasks []FolderDeletionTask
 	for task := range results {
 		deletionTasks = append(deletionTasks, task)
 	}
 
-	return deletionTasks
+	return deletionTasks, totalScanned
 }
 
 // worker processes directories concurrently
-func (c *Cleaner) worker(paths <-chan string, results chan<- FolderDeletionTask, wg *sync.WaitGroup) {
+func (c *Cleaner) worker(paths <-chan string, results chan<- FolderDeletionTask, progressChan chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for path := range paths {
+		progressChan <- path
 		info, err := os.Stat(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting file info for %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "\nError getting file info for %s: %v\n", path, err)
 			continue
 		}
 
@@ -112,18 +150,18 @@ func (c *Cleaner) worker(paths <-chan string, results chan<- FolderDeletionTask,
 			exists, err = CheckFolderAndConfigExists(filepath.Dir(path), ".pixi", "pixi.toml", "pyproject.toml")
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error checking folder existence: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nError checking folder existence: %v\n", err)
 			continue
 		}
 
 		if exists {
 			size, err := CalculateDirSize(path)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error calculating directory size: %v\n", err)
+				fmt.Fprintf(os.Stderr, "\nError calculating directory size: %v\n", err)
 				continue
 			}
 
-			fmt.Printf("Identified %s directory for cleanup at %s, will free up %s.\n", info.Name(), path, HumanizeBytes(size))
+			fmt.Printf("\nIdentified %s directory for cleanup at %s, will free up %s.\n", info.Name(), path, HumanizeBytes(size))
 
 			results <- FolderDeletionTask{
 				Path: path,
